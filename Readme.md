@@ -184,3 +184,7 @@ sentinel `user_key=0` row
 
 **Asad Ur Rehman**  
 [LinkedIn](https://www.linkedin.com/in/asad-ur-rehman-108439285/) · [GitHub](https://github.com/Asad-Ur-R)
+
+---
+
+## NOTE: Data folders are not uploaded. Add source CSV files to `data/cloud_source/`
