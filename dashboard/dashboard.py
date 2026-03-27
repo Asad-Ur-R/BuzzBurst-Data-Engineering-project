@@ -34,11 +34,43 @@ PLOTLY_THEME = {
 
 @st.cache_resource
 def get_engine():
-    url = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # Try Streamlit secrets first (cloud deployment)
+    try:
+        import streamlit as st
+        db_user     = st.secrets["DB_USER"]
+        db_password = st.secrets["DB_PASSWORD"]
+        db_host     = st.secrets["DB_HOST"]
+        db_port     = st.secrets["DB_PORT"]
+        db_name     = st.secrets["DB_NAME"]
+    except Exception:
+        #Fall back to .env for local development
+        db_user     = os.getenv("DB_USER")
+        db_password = os.getenv("DB_PASSWORD")
+        db_host     = os.getenv("DB_HOST")
+        db_port     = os.getenv("DB_PORT")
+        db_name     = os.getenv("DB_NAME")
+
+    #Neon requires SSL
+    try:
+        # ── Streamlit Cloud — reads from secrets.toml ────────
+        url = (
+            f"postgresql+psycopg2://{st.secrets['DB_USER']}:{st.secrets['DB_PASSWORD']}"
+            f"@{st.secrets['DB_HOST']}:{st.secrets['DB_PORT']}/{st.secrets['DB_NAME']}"
+            f"?sslmode=require"
+        )
+        print("[DB] Using Streamlit secrets")
+    except Exception as e:
+        print(f"[DB] Secrets failed ({e}), using local .env")
+        # ── Local development — reads from .env ──────────────
+        url = (
+            f"postgresql+psycopg2://{os.getenv('DB_USER', 'postgres')}:{os.getenv('DB_PASSWORD', 'asad123')}"
+            f"@{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME', 'buzzburst_gold')}"
+            # No sslmode for local postgres
+        )
+
     return create_engine(url)
 
-
-# ── Data Loaders (cached for 10 seconds)
+# Data Loaders (cached for 10 seconds)
 
 @st.cache_data(ttl=10)
 def load_marketing_performance():
@@ -46,13 +78,14 @@ def load_marketing_performance():
     df = pd.read_sql("""
         SELECT
             fmp.date_key,
-            TO_DATE(fmp.date_key::TEXT, 'YYYYMMDD') AS date,
-            fmp.total_ad_spend::NUMERIC AS total_ad_spend,
-            fmp.total_revenue::NUMERIC  AS total_revenue,
-            fmp.paying_users,
-            fmp.roas::NUMERIC AS roas,
-            fmp.cac::NUMERIC  AS cac
+            TO_DATE(fmp.date_key::TEXT, 'YYYYMMDD')  AS date,
+            COALESCE(fmp.total_ad_spend::NUMERIC, 0)  AS total_ad_spend,
+            COALESCE(fmp.total_revenue::NUMERIC, 0)   AS total_revenue,
+            COALESCE(fmp.paying_users, 0)             AS paying_users,
+            fmp.roas::NUMERIC                         AS roas,
+            fmp.cac::NUMERIC                          AS cac
         FROM fact_marketing_performance fmp
+        WHERE fmp.date_key IS NOT NULL
         ORDER BY fmp.date_key
     """, engine)
     return df
@@ -60,10 +93,6 @@ def load_marketing_performance():
 
 @st.cache_data(ttl=10)
 def load_roas_by_platform():
-    """
-    ROAS per platform — Option A
-    Uses fact_ad_spend + fact_sales joined through dim_platform and dim_date
-    """
     engine = get_engine()
     df = pd.read_sql("""
         WITH spend_by_platform AS (
@@ -74,30 +103,24 @@ def load_roas_by_platform():
             JOIN dim_platform dp ON fa.platform_key = dp.platform_key
             GROUP BY dp.platform
         ),
-        revenue_by_date AS (
-            SELECT
-                date_key,
-                SUM(amount::NUMERIC) AS daily_revenue
-            FROM fact_sales
-            GROUP BY date_key
-        ),
         total_revenue AS (
-            SELECT SUM(daily_revenue) AS grand_revenue
-            FROM revenue_by_date
+            SELECT COALESCE(SUM(amount::NUMERIC), 0) AS grand_revenue
+            FROM fact_sales
         )
         SELECT
             s.platform,
-            s.total_spend,
+            COALESCE(s.total_spend, 0) AS total_spend,
             t.grand_revenue AS total_revenue,
-            ROUND(
-                (t.grand_revenue / NULLIF(s.total_spend, 0))::NUMERIC
-            , 4)  AS roas
+            CASE
+                WHEN s.total_spend > 0
+                THEN ROUND((t.grand_revenue / s.total_spend)::NUMERIC, 4)
+                ELSE 0
+            END  AS roas
         FROM spend_by_platform s
         CROSS JOIN total_revenue t
         ORDER BY roas DESC
     """, engine)
     return df
-
 
 @st.cache_data(ttl=10)
 def load_cac_over_time():
@@ -116,18 +139,36 @@ def load_cac_over_time():
 
 
 @st.cache_data(ttl=10)
+def load_cac_over_time():
+    engine = get_engine()
+    df = pd.read_sql("""
+        SELECT
+            TO_DATE(date_key::TEXT, 'YYYYMMDD') AS date,
+            cac::NUMERIC  AS cac,
+            total_ad_spend::NUMERIC AS total_ad_spend,
+            COALESCE(paying_users, 0) AS paying_users
+        FROM fact_marketing_performance
+        WHERE cac IS NOT NULL
+        AND date_key IS NOT NULL
+        ORDER BY date_key
+    """, engine)
+    return df
+
+
+@st.cache_data(ttl=10)
 def load_live_sales_feed():
     engine = get_engine()
     df = pd.read_sql("""
         SELECT
             fs.sale_id,
             TO_DATE(fs.date_key::TEXT, 'YYYYMMDD') AS date,
-            du.full_name  AS customer,
-            dp.product_name,
-            fs.amount::NUMERIC AS amount
+            COALESCE(du.full_name, 'Unknown')       AS customer,
+            COALESCE(dp.product_name, 'Unknown')    AS product,
+            COALESCE(fs.amount::NUMERIC, 0)         AS amount
         FROM fact_sales fs
         LEFT JOIN dim_user    du ON fs.user_key    = du.user_key
         LEFT JOIN dim_product dp ON fs.product_key = dp.product_key
+        WHERE fs.date_key IS NOT NULL
         ORDER BY fs.date_key DESC, fs.sale_id DESC
         LIMIT 50
     """, engine)
@@ -143,6 +184,7 @@ def load_daily_sales_chart():
             SUM(amount::NUMERIC) AS daily_revenue,
             COUNT(sale_id) AS transactions
         FROM fact_sales
+        WHERE date_key IS NOT NULL
         GROUP BY date_key
         ORDER BY date_key
     """, engine)
@@ -154,12 +196,13 @@ def load_summary_kpis():
     engine = get_engine()
     row = pd.read_sql("""
         SELECT
-            SUM(total_revenue::NUMERIC)  AS total_revenue,
-            SUM(total_ad_spend::NUMERIC) AS total_spend,
-            AVG(roas::NUMERIC)           AS avg_roas,
-            AVG(cac::NUMERIC)            AS avg_cac,
-            SUM(paying_users)            AS total_customers
+            COALESCE(SUM(total_revenue::NUMERIC), 0)  AS total_revenue,
+            COALESCE(SUM(total_ad_spend::NUMERIC), 0) AS total_spend,
+            COALESCE(AVG(roas::NUMERIC), 0) AS avg_roas,
+            COALESCE(AVG(cac::NUMERIC), 0) AS avg_cac,
+            COALESCE(SUM(paying_users), 0) AS total_customers
         FROM fact_marketing_performance
+        WHERE date_key IS NOT NULL
     """, engine).iloc[0]
     return row
 
