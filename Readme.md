@@ -183,7 +183,7 @@ sentinel `user_key=0` row
 ## 👤 Author
 
 **Asad Ur Rehman**  
-[LinkedIn](https://www.linkedin.com/in/asad-ur-rehman-108439285/) · [GitHub](https://github.com/Asad-Ur-R)
+[LinkedIn](https://www.linkedin.com/in/asad-ur-rehman-108439285/) · [GitHub](https://github.com/Asad-Ur-R) · [Streamlit](https://buzzburst-data-engineering-project-x57vrdexaxvgzzgth8jons.streamlit.app/)
 
 ---
 
